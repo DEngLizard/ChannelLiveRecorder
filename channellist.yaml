@@ -1,0 +1,9 @@
+channels:
+  - name: RockBottomPod
+    target: ./recordings/RockBottomPod
+    
+  - name: SitDownZumock
+    target: ./recordings/SitDownZumock
+    
+  - name: MLCPodcast
+    target: ./recordings/MLCPodcast
