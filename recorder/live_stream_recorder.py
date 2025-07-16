@@ -17,6 +17,7 @@ FAST_POLL_INTERVAL = 15
 DEFAULT_POLL_INTERVAL = 300
 FAST_POLL_DURATION = timedelta(minutes=30)
 log_files = {}
+cookies_flag = None  # Global for use in subprocess
 
 def log(msg, channel=None):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -105,13 +106,19 @@ def start_recording(video_url, output_dir, channel):
     log_path = os.path.join(output_dir, f"{channel}.log")
     log_files[channel] = log_path
 
+    cmd = [
+        'yt-dlp',
+        '--live-from-start',
+        '-o', os.path.join(output_dir, '%(title)s.%(ext)s'),
+    ]
+
+    if cookies_flag:
+        cmd += ['--cookies-from-browser', cookies_flag]
+
+    cmd.append(video_url)
+
     process = subprocess.Popen(
-        [
-            'yt-dlp',
-            '--live-from-start',
-            '-o', os.path.join(output_dir, '%(title)s.%(ext)s'),
-            video_url
-        ],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -169,7 +176,14 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, cleanup)
 
     if len(sys.argv) < 3:
-        print("Usage: python live_stream_recorder.py <channel_name> <output_path>")
+        print("Usage: python live_stream_recorder.py <channel_name> <output_path> [--cookies-from-browser browser]")
         sys.exit(1)
+
+    if '--cookies-from-browser' in sys.argv:
+        idx = sys.argv.index('--cookies-from-browser')
+        if idx + 1 < len(sys.argv):
+            cookies_flag = sys.argv[idx + 1]
+            # Remove it so it's not passed as unexpected to `main`
+            del sys.argv[idx:idx + 2]
 
     main(sys.argv[1], sys.argv[2])
