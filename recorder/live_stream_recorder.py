@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import contextlib
 import io
 from colorama import init, Fore, Style
+import threading
 
 init()
 
@@ -123,15 +124,12 @@ def start_recording(video_url, output_dir, channel):
             if line:
                 log(line, channel)
 
-    import threading
     threading.Thread(target=stream_output, daemon=True).start()
-
     return process
 
 def main(channel, base_output_path):
     log(f"🎯 Monitoring", channel)
-    output_path = os.path.join(base_output_path, channel)
-    os.makedirs(output_path, exist_ok=True)
+    os.makedirs(base_output_path, exist_ok=True)
 
     recording_proc = None
     fast_polling = False
@@ -145,7 +143,7 @@ def main(channel, base_output_path):
         if not recording_proc:
             stream = is_currently_live(channel)
             if stream:
-                recording_proc = start_recording(stream['url'], output_path, channel)
+                recording_proc = start_recording(stream['url'], base_output_path, channel)
                 fast_polling = False
                 continue
 
