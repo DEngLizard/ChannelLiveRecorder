@@ -23,30 +23,54 @@ def download_channel_section(handle, section_name, url, base_path, members_only=
     archive_file = os.path.join(base_path, f"archive_{section_name}.txt")
     os.makedirs(out_dir, exist_ok=True)
 
-    print(f"📥 Downloading @{handle} {section_name} → {out_dir} (members_only={members_only})")
+    print(f"📥 Probing @{handle} {section_name} → {out_dir} (members_only={members_only})")
 
-    cmd = [
+    # Step 1: Get flat playlist entries
+    probe_cmd = [
         YT_DLP,
-        url,
-        '-o', os.path.join(out_dir, '%(upload_date)s - %(title).100B [%(id)s].%(ext)s'),
-        '--download-archive', archive_file,
-        '--merge-output-format', 'mp4',
-        '--format', 'bestvideo+bestaudio/best',
+        '--flat-playlist',
+        '--dump-json',
+        url
     ]
 
-    if members_only:
-        if browser:
-            cmd += ['--cookies-from-browser', browser]
-        else:
-            print(f"⚠️  Skipping members-only for @{handle} because no browser was provided.")
-            return
-    else:
-        cmd += ['--match-filter', "is_live or availability != 'members_only'"]
-
     try:
-        subprocess.run(cmd, check=True)
+        probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as e:
-        print(f"❌ Error downloading {section_name} from @{handle}: {e}")
+        print(f"❌ Failed to probe {url}: {e}")
+        return
+
+    # Step 2: Download filtered videos
+    for line in probe_result.stdout.strip().splitlines():
+        try:
+            import json
+            data = json.loads(line)
+            video_id = data.get('id')
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            availability = (data.get('availability') or '').lower()
+
+            if not members_only and 'members_only' in availability.lower():
+                print(f"⏩ Skipping members-only video: {data.get('title', video_id)}")
+                continue
+
+            cmd = [
+                YT_DLP,
+                video_url,
+                '-o', os.path.join(out_dir, '%(upload_date)s - %(title).100B [%(id)s].%(ext)s'),
+                '--download-archive', archive_file,
+                '--merge-output-format', 'mp4',
+                '--format', 'bestvideo+bestaudio/best',
+                '--no-warnings',
+                '--ignore-errors'
+            ]
+
+            if members_only and browser:
+                cmd += ['--cookies-from-browser', browser]
+
+            subprocess.run(cmd)
+
+        except Exception as e:
+            print(f"⚠️ Error processing video: {e}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Download all content from listed YouTube channels.")
