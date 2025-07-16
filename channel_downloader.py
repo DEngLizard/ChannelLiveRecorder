@@ -46,9 +46,11 @@ def download_channel_section(handle, section_name, url, base_path, members_only=
             data = json.loads(line)
             video_id = data.get('id')
             video_url = f"https://www.youtube.com/watch?v={video_id}"
-            availability = (data.get('availability') or '').lower()
+            availability_raw = data.get('availability')
+            availability = availability_raw.lower() if isinstance(availability_raw, str) else ''
+            #print("availability: "+str(availability))
 
-            if not members_only and 'members_only' in availability.lower():
+            if not members_only and 'subscriber_only' in availability:
                 print(f"⏩ Skipping members-only video: {data.get('title', video_id)}")
                 continue
 
