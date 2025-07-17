@@ -1,9 +1,13 @@
 channels:
   - name: RockBottomPod
-    target: ./recordings/RockBottomPod
+    target: "Z:/Hackverse/Show-Archive/Ray-Devito-Archiv"
     
   - name: SitDownZumock
-    target: ./recordings/SitDownZumock
+    target: "Z:/Hackverse/Show-Archive/Z-Man-Archive"
     
   - name: MLCPodcast
-    target: ./recordings/MLCPodcast
+    target: "Z:/Hackverse/Show-Archive/MLC-Archive"
+    
+  - name: bedabbler
+    target: "Z:/Hackverse/Show-Archive/BeDabbler-Archive"
+    members-only: true 
