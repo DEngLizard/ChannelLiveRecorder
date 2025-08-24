@@ -13,8 +13,8 @@ import threading
 
 init()
 
-FAST_POLL_INTERVAL = 15
-DEFAULT_POLL_INTERVAL = 300
+FAST_POLL_INTERVAL = 60
+DEFAULT_POLL_INTERVAL = 220
 FAST_POLL_DURATION = timedelta(minutes=30)
 log_files = {}
 cookies_flag = None  # Global for use in subprocess
@@ -105,11 +105,12 @@ def start_recording(video_url, output_dir, channel):
 
     log_path = os.path.join(output_dir, f"{channel}.log")
     log_files[channel] = log_path
+    timestamp_prefix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     cmd = [
         'yt-dlp',
         '--live-from-start',
-        '-o', os.path.join(output_dir, '%(title)s.%(ext)s'),
+        '-o', os.path.join(output_dir, f'{timestamp_prefix}_%(title)s.%(ext)s'),
     ]
 
     if cookies_flag:

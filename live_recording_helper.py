@@ -9,7 +9,7 @@ import argparse
 
 RECORDER_PATH = os.path.join('recorder', 'live_stream_recorder.py')
 CONFIG_PATH = './channellist.yaml'
-CHECK_INTERVAL = 300  # seconds
+CHECK_INTERVAL = 240  # seconds
 
 running_processes = {}
 cookies_arg = []
@@ -57,6 +57,7 @@ def main():
         for name, cfg in active_channels.items():
             if name not in current_channels:
                 running_processes[name] = start_recorder(cfg)
+                time.sleep(2)
 
         for name in current_channels - set(active_channels.keys()):
             stop_recorder(name)
