@@ -6,7 +6,7 @@ import argparse
 import json
 import re
 
-CONFIG_PATH = './channellist.yaml'
+CONFIG_PATH = './downloadlist.yaml'
 YT_DLP = 'yt-dlp'
 
 FORMATS = {

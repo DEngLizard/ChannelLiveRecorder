@@ -10,6 +10,7 @@ import contextlib
 import io
 from colorama import init, Fore, Style
 import threading
+import argparse
 
 init()
 
@@ -17,7 +18,10 @@ FAST_POLL_INTERVAL = 60
 DEFAULT_POLL_INTERVAL = 220
 FAST_POLL_DURATION = timedelta(minutes=30)
 log_files = {}
-cookies_flag = None  # Global for use in subprocess
+cookies_file = None          # Path to cookies.txt
+cookies_from_browser = None  # Browser name for --cookies-from-browser
+running = True               # global run flag
+
 
 def log(msg, channel=None):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -33,6 +37,7 @@ def log(msg, channel=None):
         log_line = f"{prefix}{msg}"
     print(log_line)
 
+
 @contextlib.contextmanager
 def suppress_stderr():
     stderr = sys.stderr
@@ -42,8 +47,10 @@ def suppress_stderr():
     finally:
         sys.stderr = stderr
 
+
 def sanitize_filename(name):
     return re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', name).strip()
+
 
 def get_stream_info(channel):
     url = f'https://www.youtube.com/@{channel}/streams'
@@ -63,6 +70,7 @@ def get_stream_info(channel):
         except Exception as e:
             log(f"⚠️ Error checking upcoming: {e}", channel)
     return None
+
 
 def is_currently_live(channel):
     url = f'https://www.youtube.com/@{channel}/live'
@@ -99,6 +107,7 @@ def is_currently_live(channel):
     log(f"ℹ️ Not currently live.", channel)
     return None
 
+
 def start_recording(video_url, output_dir, channel):
     os.makedirs(output_dir, exist_ok=True)
     log(f"🔴 Starting recording to {output_dir}", channel)
@@ -113,8 +122,11 @@ def start_recording(video_url, output_dir, channel):
         '-o', os.path.join(output_dir, f'{timestamp_prefix}_%(title)s.%(ext)s'),
     ]
 
-    if cookies_flag:
-        cmd += ['--cookies-from-browser', cookies_flag]
+    # Prefer browser cookies over file if both somehow set
+    if cookies_from_browser:
+        cmd += ['--cookies-from-browser', cookies_from_browser]
+    elif cookies_file:
+        cmd += ['--cookies', cookies_file]
 
     cmd.append(video_url)
 
@@ -135,7 +147,9 @@ def start_recording(video_url, output_dir, channel):
     threading.Thread(target=stream_output, daemon=True).start()
     return process
 
+
 def main(channel, base_output_path):
+    global running
     log(f"🎯 Monitoring", channel)
     os.makedirs(base_output_path, exist_ok=True)
 
@@ -143,10 +157,13 @@ def main(channel, base_output_path):
     fast_polling = False
     fast_polling_start = None
 
-    while True:
+    while running:
         if recording_proc and recording_proc.poll() is not None:
             log("🛑 Recording ended.", channel)
             recording_proc = None
+
+        if not running:
+            break
 
         if not recording_proc:
             stream = is_currently_live(channel)
@@ -168,23 +185,48 @@ def main(channel, base_output_path):
 
         time.sleep(FAST_POLL_INTERVAL if fast_polling else DEFAULT_POLL_INTERVAL)
 
+    log("👋 Exiting main loop.", channel)
+
+
 def cleanup(signum, frame):
+    global running
     print("\n🧹 Clean exit.")
-    sys.exit(0)
+    running = False
+
 
 if __name__ == '__main__':
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
-    if len(sys.argv) < 3:
-        print("Usage: python live_stream_recorder.py <channel_name> <output_path> [--cookies-from-browser browser]")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Record YouTube live streams for a single channel."
+    )
+    parser.add_argument('channel_name', help='YouTube @channel name (without @)')
+    parser.add_argument('output_path', help='Directory to save recordings')
 
-    if '--cookies-from-browser' in sys.argv:
-        idx = sys.argv.index('--cookies-from-browser')
-        if idx + 1 < len(sys.argv):
-            cookies_flag = sys.argv[idx + 1]
-            # Remove it so it's not passed as unexpected to `main`
-            del sys.argv[idx:idx + 2]
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        '--cookies',
+        metavar='COOKIE_FILE',
+        help='Path to cookies.txt to be passed to yt-dlp as --cookies'
+    )
+    group.add_argument(
+        '--cookies-from-browser',
+        metavar='BROWSER',
+        help='Browser name for yt-dlp --cookies-from-browser (e.g. firefox, chrome)'
+    )
 
-    main(sys.argv[1], sys.argv[2])
+    args = parser.parse_args()
+
+    if args.cookies:
+        candidate = os.path.expanduser(args.cookies)
+        if os.path.isfile(candidate):
+            cookies_file = os.path.abspath(candidate)
+            print(f"Using cookies file: {cookies_file}")
+        else:
+            print(f"⚠️ Cookies file not found: {candidate} (continuing without cookies)")
+    elif args.cookies_from_browser:
+        cookies_from_browser = args.cookies_from_browser
+        print(f"Using cookies from browser: {cookies_from_browser}")
+
+    main(args.channel_name, args.output_path)
