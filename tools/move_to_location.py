@@ -11,7 +11,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 CONFIG_PATH = os.path.join(REPO_ROOT, 'channellist.yaml')
 TEMP_BASE = os.path.join(REPO_ROOT, 'temp')
 
-POLL_INTERVAL = 60  # seconds between scans
+POLL_INTERVAL = 240  # seconds between scans
 
 # Typical yt-dlp temp/aux files to ignore
 SKIP_EXTENSIONS = {'.part', '.ytdl'}
