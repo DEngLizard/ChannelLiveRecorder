@@ -71,10 +71,21 @@ if %ERRORLEVEL% NEQ 0 (
 echo --------------------------------------------
 echo Installing ChannelLiveRecorder dependencies
 echo --------------------------------------------
-"%VENV_PYTHON%" -m pip install "yt-dlp[default]" colorama PyYAML
+"%VENV_PYTHON%" -m pip install "yt-dlp[default]" colorama PyYAML requests Pillow
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Failed to install Python dependencies.
     exit /b 1
+)
+
+echo --------------------------------------------
+echo Checking for ffmpeg (required for chat render + merge)
+echo --------------------------------------------
+where ffmpeg >nul 2>nul
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] ffmpeg not found on PATH.
+    echo        Install ffmpeg and ensure it's on PATH if you want chat render videos and auto-merging.
+) else (
+    for /f "usebackq delims=" %%A in (`ffmpeg -version ^| findstr /R "^ffmpeg "`) do echo ffmpeg detected: %%A
 )
 
 echo --------------------------------------------
@@ -103,11 +114,11 @@ echo   call .venv\Scripts\activate
 echo.
 echo Then to start the recorder helper:
 echo.
-echo   python live-recording-helper.py
+echo   start.bat
 echo.
-echo With cookies:
+echo With cookies (from browser):
 echo.
-echo   python live-recording-helper.py --cookies %%USERPROFILE%%\ChannelLiveRecorder\cookies.txt
+echo   start.bat --cookies-from-browser firefox
 echo.
 echo To test a single channel recorder directly:
 echo.

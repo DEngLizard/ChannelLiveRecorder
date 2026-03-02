@@ -6,6 +6,8 @@ import signal
 import sys
 import os
 import argparse
+import logging
+from datetime import datetime
 
 RECORDER_PATH = os.path.join('recorder', 'live_stream_recorder.py')
 CHAT_RECORDER_PATH = os.path.join('recorder', 'live_chat_recorder.py')
@@ -18,8 +20,32 @@ MOVER_PATH = os.path.join('tools', 'move_to_location.py')
 # running_processes[channel_name] = {"video": Popen, "chat": Popen}
 running_processes = {}
 cookies_args = []  # passed through to both recorders
+cookie_fallback_args = []  # passed through to both recorders
 mover_proc = None  # global handle for the mover process
 shutting_down = False  # avoid double cleanup
+
+
+# Logging (console + logs/live_recording_helper.log)
+REPO_ROOT = os.path.abspath(os.path.dirname(__file__))
+LOG_DIR = os.path.join(REPO_ROOT, 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
+logger = logging.getLogger("helper")
+logger.setLevel(logging.INFO)
+
+_fmt = logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+_fh = logging.FileHandler(os.path.join(LOG_DIR, "live_recording_helper.log"), encoding="utf-8")
+_fh.setFormatter(_fmt)
+_sh = logging.StreamHandler(sys.stdout)
+_sh.setFormatter(_fmt)
+
+if not logger.handlers:
+    logger.addHandler(_fh)
+    logger.addHandler(_sh)
+
+
+def log(msg: str):
+    logger.info(msg)
 
 
 def load_channels():
@@ -38,9 +64,9 @@ def start_video_recorder(channel_cfg):
 
     os.makedirs(temp_target, exist_ok=True)
 
-    cmd = [sys.executable, RECORDER_PATH, name, temp_target] + cookies_args
+    cmd = [sys.executable, RECORDER_PATH, name, temp_target] + cookies_args + cookie_fallback_args
 
-    print(f"🚀 Starting VIDEO recorder for @{name}, saving to temp {temp_target}")
+    log(f"🚀 Starting VIDEO recorder for @{name}, saving to temp {temp_target}")
     # start_new_session=True → child doesn't receive Ctrl+C from the terminal
     return subprocess.Popen(
         cmd,
@@ -54,9 +80,9 @@ def start_chat_recorder(channel_cfg):
 
     os.makedirs(temp_target, exist_ok=True)
 
-    cmd = [sys.executable, CHAT_RECORDER_PATH, name, temp_target] + cookies_args
+    cmd = [sys.executable, CHAT_RECORDER_PATH, name, temp_target] + cookies_args + cookie_fallback_args
 
-    print(f"💬 Starting CHAT recorder for @{name}, saving to temp {temp_target}")
+    log(f"💬 Starting CHAT recorder for @{name}, saving to temp {temp_target}")
     return subprocess.Popen(
         cmd,
         start_new_session=True,
@@ -73,22 +99,22 @@ def start_recorders(channel_cfg):
 
 def stop_proc(label, proc):
     if proc and proc.poll() is None:
-        print(f"🛑 Stopping {label}")
+        log(f"🛑 Stopping {label}")
         try:
             proc.terminate()
         except Exception as e:
-            print(f"⚠️ Error sending terminate to {label}: {e}")
+            log(f"⚠️ Error sending terminate to {label}: {e}")
         try:
             # Short timeout so shutdown feels snappy
             proc.wait(timeout=1)
         except subprocess.TimeoutExpired:
-            print(f"⚠️ {label} did not exit, killing...")
+            log(f"⚠️ {label} did not exit, killing...")
             try:
                 proc.kill()
             except Exception as e:
-                print(f"⚠️ Error killing {label}: {e}")
+                log(f"⚠️ Error killing {label}: {e}")
         except Exception as e:
-            print(f"⚠️ Error while waiting for {label}: {e}")
+            log(f"⚠️ Error while waiting for {label}: {e}")
 
 
 def stop_recorder(channel_name):
@@ -105,11 +131,11 @@ def start_mover():
         return  # already running
 
     if not os.path.isfile(MOVER_PATH):
-        print(f"⚠️ Mover script not found at {MOVER_PATH} – skipping mover start.")
+        log(f"⚠️ Mover script not found at {MOVER_PATH} – skipping mover start.")
         return
 
     cmd = [sys.executable, MOVER_PATH]
-    print(f"🚚 Starting mover process: {' '.join(cmd)}")
+    log(f"🚚 Starting mover process: {' '.join(cmd)}")
     mover_proc = subprocess.Popen(
         cmd,
         start_new_session=True,  # don't forward Ctrl+C to mover either
@@ -131,7 +157,7 @@ def cleanup(signum, frame):
         return
     shutting_down = True
 
-    print("\n🧹 Cleaning up all recorders...")
+    log("🧹 Cleaning up all recorders...")
     # Stop all channel recorders
     for channel in list(running_processes.keys()):
         stop_recorder(channel)
@@ -139,7 +165,7 @@ def cleanup(signum, frame):
     # Stop mover
     stop_mover()
 
-    print("👋 Helper exiting.")
+    log("👋 Helper exiting.")
     sys.exit(0)
 
 
@@ -173,7 +199,7 @@ def main():
             for kind in ("video", "chat"):
                 proc = procs.get(kind)
                 if proc and proc.poll() is not None:
-                    print(f"🔁 Restarting dead {kind.UPPER()} recorder for @{name}")
+                    log(f"🔁 Restarting dead {kind.upper()} recorder for @{name}")
                     if kind == "video":
                         procs["video"] = start_video_recorder(active_channels[name])
                     else:
@@ -201,17 +227,28 @@ if __name__ == '__main__':
         help='Browser name for yt-dlp --cookies-from-browser (e.g. firefox, chrome)'
     )
 
+    parser.add_argument(
+        '--no-cookie-fallback',
+        action='store_true',
+        help='If cookies are provided, do NOT try the no-cookies-first then cookies fallback logic.'
+    )
+
     args = parser.parse_args()
 
     if args.cookies:
         candidate = os.path.expanduser(args.cookies)
         if os.path.isfile(candidate):
             cookies_args = ["--cookies", candidate]
-            print(f"Using cookies file for all recorders: {candidate}")
+            log(f"Using cookies file for all recorders: {candidate}")
         else:
-            print(f"⚠️ Cookies file not found: {candidate} (continuing without cookies)")
+            log(f"⚠️ Cookies file not found: {candidate} (continuing without cookies)")
     elif args.cookies_from_browser:
         cookies_args = ["--cookies-from-browser", args.cookies_from_browser]
-        print(f"Using cookies from browser for all recorders: {args.cookies_from_browser}")
+        log(f"Using cookies from browser for all recorders: {args.cookies_from_browser}")
+
+    # If cookies were supplied, enable fallback behavior in the recorder scripts unless explicitly disabled.
+    if cookies_args and (not args.no_cookie_fallback):
+        cookie_fallback_args = ["--cookie-fallback"]
+        log("Cookie fallback enabled: recorders will try without cookies first, then retry with cookies if needed.")
 
     main()

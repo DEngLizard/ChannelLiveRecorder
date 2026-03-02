@@ -1,6 +1,42 @@
 channels:
+  - name: RockBottomPod
+    target: "/exchange/nocookies/Ray-Devito-Archive"
 
-  - name: MrKilleverything
-    target: "./recording/MKE-Archive"
+  - name: SitDownZumock
+    target: "/exchange/nocookies/Z-Man-Archive"
 
-  
+  - name: bedabbler
+    target: "/exchange/nocookies/BeDabbler-Archive"
+
+  - name: CardiffElect
+    target: "/exchange/nocookies/Cardiff-Archive"
+
+  - name: stutteringjohn7665
+    target: "/exchange/nocookies/SJ-Archive"
+
+  - name: Karmicx83
+    target: "/exchange/nocookies/Karmic-Archive"
+
+  - name: SilkyCyberTechHMRK
+    target: "/exchange/nocookies/Bill-Cybertech-Archive"
+
+  - name: AshleyCummingsYoga
+    target: "/exchange/nocookies/Ashley-Archive"
+
+  - name: TheTommyJordan
+    target: "/exchange/nocookies/THE-Tommy-Jordan-Archive"
+
+  - name: HeyBower
+    target: "/exchange/nocookies/Bower-Archive"
+
+  - name: HughezyEntertainment
+    target: "/exchange/nocookies/Hughezy-Archive"
+
+  - name: ShoeNice22videos
+    target: "/exchange/nocookies/ShoeNice-Archive"
+   
+  - name: MLCPodcast
+    target: "/exchange/nocookies/MLC-Archive"
+
+  - name: pdixon
+    target: "/exchange/nocookies/PDixon-Archive"

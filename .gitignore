@@ -2,3 +2,11 @@
 /recording
 /temp
 cookies.txt
+.venv
+*/__pycache__
+/tools/__pycache__
+__pycache__
+/logs
+/run
+/yt-chat-to-video_cache
+*.log

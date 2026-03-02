@@ -2,6 +2,7 @@
 import os
 import sys
 import subprocess
+import logging
 from datetime import datetime
 
 # Path to yt-chat-to-video.py relative to this file
@@ -9,9 +10,26 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 YT_CHAT_TO_VIDEO = os.path.join(SCRIPT_DIR, "yt-chat-to-video", "yt-chat-to-video.py")
 
 
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, os.pardir))
+LOG_DIR = os.path.join(REPO_ROOT, 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
+logger = logging.getLogger("chat_render")
+logger.setLevel(logging.INFO)
+
+_fmt = logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+_fh = logging.FileHandler(os.path.join(LOG_DIR, "chat_render.log"), encoding="utf-8")
+_fh.setFormatter(_fmt)
+_sh = logging.StreamHandler(sys.stdout)
+_sh.setFormatter(_fmt)
+
+if not logger.handlers:
+    logger.addHandler(_fh)
+    logger.addHandler(_sh)
+
+
 def log(msg: str):
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[chat_render {ts}] {msg}")
+    logger.info(msg)
 
 
 def render_chat_json(json_path: str, extra_args=None):
