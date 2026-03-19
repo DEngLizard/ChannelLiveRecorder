@@ -39,8 +39,12 @@ def _extract_renderer_and_times(obj):
     # Replay wrapper
     if isinstance(obj, dict) and 'replayChatItemAction' in obj:
         r = obj['replayChatItemAction']
+
+        # yt-dlp live_chat replay JSON usually stores videoOffsetTimeMsec at the
+        # top level of each JSON object, not inside replayChatItemAction.
+        raw_offset = obj.get('videoOffsetTimeMsec', r.get('videoOffsetTimeMsec', 0))
         try:
-            offset_ms = int(r.get('videoOffsetTimeMsec', 0))
+            offset_ms = int(raw_offset)
         except Exception:
             offset_ms = 0
         for act in r.get('actions', []):
@@ -214,6 +218,7 @@ for obj in actions:
 
 # Build normalized message tuples: (time_ms, avatar_url, author, runs)
 messages = []
+raw_replay_offsets = []
 for obj in actions:
     renderer, ts_usec, offset_ms = _extract_renderer_and_times(obj)
     if not renderer:
@@ -222,6 +227,7 @@ for obj in actions:
     # Compute time_ms
     if offset_ms is not None:
         time_ms = int(offset_ms)
+        raw_replay_offsets.append(time_ms)
     elif ts_usec is not None and first_ts_usec is not None:
         time_ms = max(0, int((ts_usec - first_ts_usec) / 1000))  # usec → ms offset
     else:
@@ -266,14 +272,33 @@ if not messages:
         raise SystemExit("Error: No messages within selected time window")
     raise SystemExit("Error: No messages found in the chat file")
 
+print(f"Loaded {len(actions)} action objects")
+print(f"Normalized {len(messages)} chat messages")
+
+if raw_replay_offsets:
+    print(
+        "Raw replay offset range: "
+        f"{min(raw_replay_offsets)}ms .. {max(raw_replay_offsets)}ms "
+        f"({min(raw_replay_offsets)/1000.0:.3f}s .. {max(raw_replay_offsets)/1000.0:.3f}s)"
+    )
+
 # Sort and compute duration
 messages.sort(key=lambda m: m[0])
+print(
+    "Normalized message time range: "
+    f"{messages[0][0]}ms .. {messages[-1][0]}ms "
+    f"({messages[0][0]/1000.0:.3f}s .. {messages[-1][0]/1000.0:.3f}s)"
+)
 max_duration_seconds = messages[-1][0] / 1000.0
 
 if end_time_seconds == 0:
     end_time_seconds = max_duration_seconds
 
 duration_seconds = max(0.0, float(end_time_seconds) - float(start_time_seconds))
+print(
+    f"Render window: start={start_time_seconds:.3f}s end={end_time_seconds:.3f}s "
+    f"duration={duration_seconds:.3f}s fps={fps}"
+)
 
 # --- Fallback if duration is 0 or times are non-increasing ---
 if duration_seconds <= 0.0 or all(m[0] == messages[0][0] for m in messages):

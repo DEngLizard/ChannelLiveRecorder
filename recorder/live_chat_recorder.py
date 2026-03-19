@@ -1,36 +1,18 @@
 #!/usr/bin/env python3
-"""Single-channel LIVE chat recorder.
-
-Behavior goals:
-- Poll /@channel/live forever.
-- Not live -> slow poll (default 240s)
-- Scheduled -> adaptive poll based on "will begin in X ..."
-- FAST MODE -> once we are close to scheduled start, poll ~every minute AND
-               keep that fast polling for a grace period after scheduled start
-               (streamers can be 5–15 minutes late).
-- Cookie fallback ONLY for auth/bot/challenge failures (NOT for "not live" or "begins in").
-- Always enables: --remote-components ejs:github
-- Auto-caps "scheduled far away" polling at 20 minutes max.
-- Writes logs to logs/chat_<channel>.log
-
-Notes:
-- yt-dlp writes the live chat as subtitles (live_chat) to .live_chat.json / .json3.
-- While running, yt-dlp may create *.part files; mover should ignore them.
-"""
+"""Single-channel LIVE chat recorder."""
 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
-import logging
 from dataclasses import dataclass
 
-
-# -------- logging --------
 
 def _setup_logger(repo_root: str, channel: str) -> logging.Logger:
     log_dir = os.path.join(repo_root, "logs")
@@ -51,8 +33,6 @@ def _setup_logger(repo_root: str, channel: str) -> logging.Logger:
     return logger
 
 
-# -------- output classification --------
-
 AUTH_PATTERNS = [
     re.compile(r"sign in to confirm.*not a bot", re.IGNORECASE),
     re.compile(r"use --cookies-from-browser|use --cookies", re.IGNORECASE),
@@ -69,18 +49,18 @@ NOT_LIVE_PATTERNS = [
     re.compile(r"not currently live", re.IGNORECASE),
 ]
 
-# Example: "This live event will begin in 10 hours."
 BEGIN_IN_RE = re.compile(
     r"this live event will begin in\s+(\d+)\s+(second|seconds|minute|minutes|hour|hours|day|days)",
     re.IGNORECASE,
 )
 
-# "success/activity" markers for chat writes
 CHAT_ACTIVITY_MARKERS = (
     "Writing video subtitles to:",
     "Writing video subtitles",
-    "Deleting original file",
     "Destination:",
+    "live_chat",
+    ".json3",
+    "[download]",
 )
 
 
@@ -100,16 +80,19 @@ def _parse_begins_in_seconds(line: str) -> int | None:
     n = int(m.group(1))
     unit = m.group(2).lower()
     mult = {
-        "second": 1, "seconds": 1,
-        "minute": 60, "minutes": 60,
-        "hour": 3600, "hours": 3600,
-        "day": 86400, "days": 86400,
+        "second": 1,
+        "seconds": 1,
+        "minute": 60,
+        "minutes": 60,
+        "hour": 3600,
+        "hours": 3600,
+        "day": 86400,
+        "days": 86400,
     }[unit]
     return n * mult
 
 
 def run_yt_dlp(cmd: list[str], logger: logging.Logger, stall_seconds: int = 240) -> RunSummary:
-    """Run yt-dlp and stream output. Stall watchdog triggers if no write activity after chat started."""
     logger.info("▶️ Chat command: %s", " ".join(cmd))
 
     proc = subprocess.Popen(
@@ -133,7 +116,7 @@ def run_yt_dlp(cmd: list[str], logger: logging.Logger, stall_seconds: int = 240)
             line = raw.rstrip("\n")
             logger.info(line)
 
-            if any(m in line for m in CHAT_ACTIVITY_MARKERS):
+            if any(marker in line for marker in CHAT_ACTIVITY_MARKERS):
                 saw_write_activity = True
                 last_activity = time.time()
 
@@ -143,18 +126,17 @@ def run_yt_dlp(cmd: list[str], logger: logging.Logger, stall_seconds: int = 240)
             if any(p.search(line) for p in NOT_LIVE_PATTERNS):
                 not_live = True
 
-            bi = _parse_begins_in_seconds(line)
-            if bi is not None:
-                begins_in_seconds = bi
+            begins = _parse_begins_in_seconds(line)
+            if begins is not None:
+                begins_in_seconds = begins
 
-            # Stall watchdog: only if we've started writing something
             if saw_write_activity and (time.time() - last_activity) > stall_seconds:
                 logger.info("⚠️ No chat write activity for %ss — treating as stalled, restarting...", stall_seconds)
                 proc.kill()
                 break
 
-    except Exception as e:
-        logger.info("⚠️ Exception while reading yt-dlp output: %s", e)
+    except Exception as exc:
+        logger.info("⚠️ Exception while reading yt-dlp output: %s", exc)
         try:
             proc.kill()
         except Exception:
@@ -178,10 +160,10 @@ def run_yt_dlp(cmd: list[str], logger: logging.Logger, stall_seconds: int = 240)
     )
 
 
-def build_base_cmd(channel: str, out_dir: str) -> list[str]:
+def build_base_cmd(yt_dlp_bin: str, channel: str, out_dir: str) -> list[str]:
     out_tmpl = os.path.join(out_dir, "%(epoch>%Y-%m-%d_%H-%M-%S)s_%(id)s.%(ext)s")
     return [
-        "yt-dlp",
+        yt_dlp_bin,
         "--newline",
         "--no-color",
         "--ignore-errors",
@@ -189,6 +171,7 @@ def build_base_cmd(channel: str, out_dir: str) -> list[str]:
         "--remote-components",
         "ejs:github",
         "--skip-download",
+        "--live-from-start",
         "--write-subs",
         "--sub-langs",
         "live_chat",
@@ -200,32 +183,20 @@ def build_base_cmd(channel: str, out_dir: str) -> list[str]:
     ]
 
 
-def compute_sleep_seconds(
-    summary: RunSummary,
-    poll_slow: int,
-    poll_fast: int,
-    fast_mode_until_ts: float | None,
-) -> int:
+def compute_sleep_seconds(summary: RunSummary, poll_slow: int, poll_fast: int, fast_mode_until_ts: float | None) -> int:
     now = time.time()
 
-    # If we’re inside the "fast mode" window (near scheduled start or a bit after),
-    # do NOT drop back to slow polling even if yt-dlp says "not live".
     if fast_mode_until_ts is not None and now < fast_mode_until_ts:
         return poll_fast
 
-    # If yt-dlp actually wrote chat successfully, keep the loop responsive.
     if summary.saw_write_activity and summary.return_code == 0:
         return 15
 
-    # Not live: slow polling
     if summary.not_live:
         return poll_slow
 
-    # Scheduled: adaptive polling based on begin time
     if summary.begins_in_seconds is not None:
         s = summary.begins_in_seconds
-
-        # Far away -> don't hammer YouTube, cap max wait at 20 minutes
         if s >= 6 * 3600:
             return 20 * 60
         if s >= 2 * 3600:
@@ -236,7 +207,6 @@ def compute_sleep_seconds(
             return poll_fast
         return 15
 
-    # Generic failure: default to fast-ish retry
     return poll_fast
 
 
@@ -249,22 +219,22 @@ def main() -> int:
     g = p.add_mutually_exclusive_group()
     g.add_argument("--cookies", dest="cookies", help="cookies.txt for yt-dlp")
     g.add_argument("--cookies-from-browser", dest="cookies_from_browser", help="yt-dlp browser name (e.g. firefox)")
-    p.add_argument("--cookie-fallback", action="store_true",
-                   help="Try without cookies first, then with cookies if AUTH problems detected")
-    p.add_argument("--stall-seconds", type=int, default=240,
-                   help="Restart if no chat write activity for this long (only after chat starts)")
-    p.add_argument("--poll-slow", type=int, default=240,
-                   help="Seconds between checks when channel is not live")
-    p.add_argument("--poll-fast", type=int, default=60,
-                   help="Seconds between checks when close to live or in fast mode")
-    p.add_argument("--fast-enter-minutes", type=int, default=30,
-                   help="Enter fast mode when scheduled start is within this many minutes")
-    p.add_argument("--late-grace-minutes", type=int, default=20,
-                   help="Keep fast mode for this many minutes AFTER scheduled start (lateness buffer)")
+    p.add_argument("--cookie-fallback", action="store_true", help="Try without cookies first, then with cookies if AUTH problems detected")
+    p.add_argument("--yt-dlp-bin", default="yt-dlp", help="Absolute path or command name for yt-dlp")
+    p.add_argument("--stall-seconds", type=int, default=240, help="Restart if no chat write activity for this long (only after chat starts)")
+    p.add_argument("--poll-slow", type=int, default=240, help="Seconds between checks when channel is not live")
+    p.add_argument("--poll-fast", type=int, default=60, help="Seconds between checks when close to live or in fast mode")
+    p.add_argument("--fast-enter-minutes", type=int, default=30, help="Enter fast mode when scheduled start is within this many minutes")
+    p.add_argument("--late-grace-minutes", type=int, default=20, help="Keep fast mode for this many minutes AFTER scheduled start")
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
     logger = _setup_logger(repo_root, args.channel)
+
+    yt_dlp_bin = os.path.expanduser(args.yt_dlp_bin)
+    if not os.path.isabs(yt_dlp_bin):
+        yt_dlp_bin = shutil.which(yt_dlp_bin) or yt_dlp_bin
+    logger.info("Using yt-dlp binary: %s", yt_dlp_bin)
 
     cookie_args: list[str] = []
     if args.cookies:
@@ -272,19 +242,15 @@ def main() -> int:
     elif args.cookies_from_browser:
         cookie_args = ["--cookies-from-browser", args.cookies_from_browser]
 
-    base_cmd = build_base_cmd(args.channel, args.out_dir)
-
-    # Fast-mode window tracking (shared logic with video recorder)
+    base_cmd = build_base_cmd(yt_dlp_bin, args.channel, args.out_dir)
     fast_mode_until_ts: float | None = None
     fast_enter_threshold = max(1, args.fast_enter_minutes) * 60
     late_grace_seconds = max(0, args.late_grace_minutes) * 60
 
     def maybe_update_fast_mode(summary: RunSummary) -> None:
-        """If we see a scheduled time, enter/extend fast mode near start and keep through lateness grace."""
         nonlocal fast_mode_until_ts
         if summary.begins_in_seconds is None:
             return
-
         s = summary.begins_in_seconds
         if s <= fast_enter_threshold:
             candidate = time.time() + s + late_grace_seconds
@@ -295,7 +261,6 @@ def main() -> int:
                 logger.info("⚡ Fast mode active for ~%ss (covers scheduled start + lateness buffer).", max(0, remaining))
 
     while True:
-        # 1) Try WITHOUT cookies
         summary = run_yt_dlp(base_cmd.copy(), logger, stall_seconds=args.stall_seconds)
         maybe_update_fast_mode(summary)
 
@@ -304,7 +269,6 @@ def main() -> int:
             time.sleep(15)
             continue
 
-        # 2) Cookie fallback ONLY for auth/challenge-type failures
         if args.cookie_fallback and cookie_args and summary.saw_auth_block:
             logger.info("🔁 Auth/challenge issue detected — retrying chat WITH cookies...")
             cmd2 = base_cmd.copy()
@@ -319,12 +283,7 @@ def main() -> int:
 
             summary = summary2
 
-        sleep_s = compute_sleep_seconds(
-            summary,
-            poll_slow=args.poll_slow,
-            poll_fast=args.poll_fast,
-            fast_mode_until_ts=fast_mode_until_ts,
-        )
+        sleep_s = compute_sleep_seconds(summary, args.poll_slow, args.poll_fast, fast_mode_until_ts)
         logger.info("⏳ No chat capture. Next check in %ss...", sleep_s)
         time.sleep(sleep_s)
 

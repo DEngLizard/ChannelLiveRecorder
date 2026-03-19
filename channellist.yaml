@@ -17,9 +17,6 @@ channels:
   - name: Karmicx83
     target: "/exchange/nocookies/Karmic-Archive"
 
-  - name: SilkyCyberTechHMRK
-    target: "/exchange/nocookies/Bill-Cybertech-Archive"
-
   - name: AshleyCummingsYoga
     target: "/exchange/nocookies/Ashley-Archive"
 
@@ -40,3 +37,6 @@ channels:
 
   - name: pdixon
     target: "/exchange/nocookies/PDixon-Archive"
+
+  - name: JTtheWatcher
+    target: "/exchange/nocookies/JT-Archive"

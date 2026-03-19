@@ -2,20 +2,19 @@
 set -euo pipefail
 
 # ChannelLiveRecorder — setup.sh
-# - Creates/uses .venv
-# - Uses venv python directly (never system pip) to avoid PEP 668 issues
-# - Installs deps needed for chat renderer (requests, Pillow)
-# - Checks ffmpeg + deno presence (warns if missing)
+# - Installs system prerequisites when possible
+# - Installs official yt-dlp release binary to /usr/local/bin/yt-dlp
+# - Creates/uses .venv and installs Python dependencies inside it
 # - Logs everything to ./logs/setup.log
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_PATH="$REPO_ROOT/.venv"
 LOG_DIR="$REPO_ROOT/logs"
 LOG_FILE="$LOG_DIR/setup.log"
+YTDLP_BIN="/usr/local/bin/yt-dlp"
+YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
 
 mkdir -p "$LOG_DIR"
-
-# Log to file + console
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "============================================"
@@ -25,7 +24,6 @@ echo "Repo: $REPO_ROOT"
 echo "Log : $LOG_FILE"
 echo
 
-# Pick a python executable
 pick_python() {
   if command -v python3 >/dev/null 2>&1; then
     echo "python3"
@@ -38,6 +36,20 @@ pick_python() {
   return 1
 }
 
+have_sudo() {
+  command -v sudo >/dev/null 2>&1
+}
+
+run_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif have_sudo; then
+    sudo "$@"
+  else
+    return 1
+  fi
+}
+
 PY="$(pick_python || true)"
 if [[ -z "${PY:-}" ]]; then
   echo "❌ ERROR: Python not found (need python3)."
@@ -48,20 +60,50 @@ echo "🔍 Using Python: $PY"
 "$PY" --version
 echo
 
+if command -v apt-get >/dev/null 2>&1; then
+  echo "--------------------------------------------"
+  echo "📦 Installing system packages via apt (best effort)"
+  echo "--------------------------------------------"
+  if run_root apt-get update && run_root apt-get install -y curl ffmpeg ca-certificates python3-venv; then
+    echo "✅ System packages installed or already present"
+  else
+    echo "⚠️ Could not auto-install system packages. Install these manually if missing:"
+    echo "   curl ffmpeg ca-certificates python3-venv"
+  fi
+  echo
+else
+  echo "⚠️ apt-get not available. Ensure these are installed manually:"
+  echo "   curl ffmpeg ca-certificates python3-venv"
+  echo
+fi
+
+echo "--------------------------------------------"
+echo "📦 Installing official yt-dlp binary"
+echo "--------------------------------------------"
+if command -v curl >/dev/null 2>&1; then
+  if run_root curl -L "$YTDLP_URL" -o "$YTDLP_BIN" && run_root chmod a+rx "$YTDLP_BIN"; then
+    echo "✅ yt-dlp installed at $YTDLP_BIN"
+    "$YTDLP_BIN" --version || true
+  else
+    echo "❌ Failed to install yt-dlp to $YTDLP_BIN"
+    echo "   Re-run as root or with passwordless sudo, or install yt-dlp manually there."
+    exit 1
+  fi
+else
+  echo "❌ curl not found; cannot install yt-dlp automatically"
+  exit 1
+fi
+echo
+
 echo "--------------------------------------------"
 echo "📦 Creating or activating virtual environment"
 echo "--------------------------------------------"
-
 if [[ ! -d "$VENV_PATH" ]]; then
   echo "🆕 Creating venv at: $VENV_PATH"
   "$PY" -m venv "$VENV_PATH" || {
     echo
     echo "❌ ERROR: Failed to create venv."
-    echo "   On Ubuntu/Debian, install venv support and try again:"
-    echo "     sudo apt update"
-    echo "     sudo apt install -y python3-venv"
-    echo "   If you're on Python 3.13 specifically, you may need:"
-    echo "     sudo apt install -y python3.13-venv python3.13-full"
+    echo "   Install python3-venv and try again."
     exit 1
   }
 else
@@ -70,12 +112,7 @@ fi
 
 VENV_PY="$VENV_PATH/bin/python"
 if [[ ! -x "$VENV_PY" ]]; then
-  echo
   echo "❌ ERROR: venv python not found at: $VENV_PY"
-  echo "   Remove .venv and recreate after installing python3-venv:"
-  echo "     rm -rf .venv"
-  echo "     sudo apt install -y python3-venv"
-  echo "     ./setup.sh"
   exit 1
 fi
 
@@ -86,60 +123,35 @@ echo
 echo "--------------------------------------------"
 echo "📦 Ensuring pip exists inside venv"
 echo "--------------------------------------------"
-# ensurepip may already be present; don't fail if it's not available
 "$VENV_PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
-
-echo "pip inside venv:"
-"$VENV_PY" -m pip --version || {
-  echo
-  echo "❌ ERROR: pip is not available inside the venv."
-  echo "   Install venv/full packages and recreate the venv:"
-  echo "     sudo apt install -y python3-venv python3-full"
-  echo "     rm -rf .venv && ./setup.sh"
-  exit 1
-}
-echo
+"$VENV_PY" -m pip --version
 
 echo "--------------------------------------------"
 echo "📦 Upgrading pip + wheel + setuptools (inside venv)"
 echo "--------------------------------------------"
 "$VENV_PY" -m pip install --upgrade pip wheel setuptools
-echo
 
 echo "--------------------------------------------"
-echo "📦 Installing ChannelLiveRecorder dependencies (inside venv)"
+echo "📦 Installing ChannelLiveRecorder Python dependencies"
 echo "--------------------------------------------"
-"$VENV_PY" -m pip install -U \
-  "yt-dlp[default]" \
-  colorama \
-  PyYAML \
-  requests \
-  Pillow
-echo
+"$VENV_PY" -m pip install -U colorama PyYAML requests Pillow
 
 echo "--------------------------------------------"
-echo "🧰 Checking ffmpeg (required for chat render + stream merge)"
+echo "🧰 Checking installed tools"
 echo "--------------------------------------------"
 if command -v ffmpeg >/dev/null 2>&1; then
   echo "✅ ffmpeg: $(ffmpeg -version | head -n1)"
 else
-  echo "⚠️ ffmpeg not found."
-  echo "   Install it with:"
-  echo "     sudo apt update && sudo apt install -y ffmpeg"
+  echo "⚠️ ffmpeg not found"
 fi
-echo
-
-echo "--------------------------------------------"
-echo "🧩 Checking JS runtime for yt-dlp (Deno recommended)"
-echo "--------------------------------------------"
+if command -v "$YTDLP_BIN" >/dev/null 2>&1; then
+  echo "✅ yt-dlp: $($YTDLP_BIN --version)"
+fi
 if command -v deno >/dev/null 2>&1; then
   echo "✅ deno: $(deno --version | head -n1)"
 else
-  echo "⚠️ deno not found."
-  echo "   Some YouTube flows require a JS runtime for challenge solving."
-  echo "   Install Deno (recommended) and ensure ~/.deno/bin is on PATH."
+  echo "⚠️ deno not found. Some YouTube challenge flows may work better with Deno installed."
 fi
-echo
 
 echo "--------------------------------------------"
 echo "✅ Setup complete"

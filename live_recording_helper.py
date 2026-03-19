@@ -1,33 +1,47 @@
-# live-recording-helper.py (orchestrator)
-import subprocess
-import time
-import yaml
-import signal
-import sys
-import os
+#!/usr/bin/env python3
+"""Orchestrator for ChannelLiveRecorder.
+
+Starts one video recorder and one chat recorder per configured channel,
+keeps them alive, starts the mover sidecar, and performs periodic yt-dlp
+self-updates without needing cron.
+"""
+
+from __future__ import annotations
+
 import argparse
 import logging
-from datetime import datetime
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from typing import Any
 
-RECORDER_PATH = os.path.join('recorder', 'live_stream_recorder.py')
-CHAT_RECORDER_PATH = os.path.join('recorder', 'live_chat_recorder.py')
-CONFIG_PATH = './channellist.yaml'
-TEMP_BASE = './temp'          # base temp directory
+import yaml
+
+
+RECORDER_PATH = os.path.join("recorder", "live_stream_recorder.py")
+CHAT_RECORDER_PATH = os.path.join("recorder", "live_chat_recorder.py")
+CONFIG_PATH = "./channellist.yaml"
+TEMP_BASE = "./temp"
 CHECK_INTERVAL = 240  # seconds
+DEFAULT_YTDLP_BIN = "/usr/local/bin/yt-dlp"
+DEFAULT_UPDATE_INTERVAL_HOURS = 24.0
 
-MOVER_PATH = os.path.join('tools', 'move_to_location.py')
+MOVER_PATH = os.path.join("tools", "move_to_location.py")
 
-# running_processes[channel_name] = {"video": Popen, "chat": Popen}
-running_processes = {}
-cookies_args = []  # passed through to both recorders
-cookie_fallback_args = []  # passed through to both recorders
-mover_proc = None  # global handle for the mover process
-shutting_down = False  # avoid double cleanup
+running_processes: dict[str, dict[str, subprocess.Popen[Any]]] = {}
+cookies_args: list[str] = []
+cookie_fallback_args: list[str] = []
+yt_dlp_bin: str = DEFAULT_YTDLP_BIN
+yt_dlp_update_interval_seconds: float = DEFAULT_UPDATE_INTERVAL_HOURS * 3600
+last_yt_dlp_update_ts: float | None = None
+mover_proc: subprocess.Popen[Any] | None = None
+shutting_down = False
 
-
-# Logging (console + logs/live_recording_helper.log)
 REPO_ROOT = os.path.abspath(os.path.dirname(__file__))
-LOG_DIR = os.path.join(REPO_ROOT, 'logs')
+LOG_DIR = os.path.join(REPO_ROOT, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 logger = logging.getLogger("helper")
@@ -44,91 +58,112 @@ if not logger.handlers:
     logger.addHandler(_sh)
 
 
-def log(msg: str):
+def log(msg: str) -> None:
     logger.info(msg)
 
 
-def load_channels():
-    with open(CONFIG_PATH, 'r') as f:
-        config = yaml.safe_load(f)
-        return config.get('channels', [])
+def load_channels() -> list[dict[str, Any]]:
+    if not os.path.isfile(CONFIG_PATH):
+        log(f"⚠️ Config file not found: {CONFIG_PATH}")
+        return []
+
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+    except Exception as exc:
+        log(f"⚠️ Failed to load config {CONFIG_PATH}: {exc}")
+        return []
+
+    channels = config.get("channels", [])
+    if not isinstance(channels, list):
+        log(f"⚠️ Invalid config format in {CONFIG_PATH}: 'channels' is not a list")
+        return []
+
+    cleaned: list[dict[str, Any]] = []
+    for entry in channels:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not name:
+            continue
+        cleaned.append(entry)
+    return cleaned
 
 
 def temp_dir_for_channel(name: str) -> str:
     return os.path.abspath(os.path.join(TEMP_BASE, name))
 
 
-def start_video_recorder(channel_cfg):
-    name = channel_cfg['name']
+def build_child_base_cmd(script_path: str, channel_name: str, temp_target: str) -> list[str]:
+    cmd = [
+        sys.executable,
+        script_path,
+        channel_name,
+        temp_target,
+        "--yt-dlp-bin",
+        yt_dlp_bin,
+    ]
+    cmd.extend(cookies_args)
+    cmd.extend(cookie_fallback_args)
+    return cmd
+
+
+def start_video_recorder(channel_cfg: dict[str, Any]) -> subprocess.Popen[Any]:
+    name = channel_cfg["name"]
     temp_target = temp_dir_for_channel(name)
-
     os.makedirs(temp_target, exist_ok=True)
-
-    cmd = [sys.executable, RECORDER_PATH, name, temp_target] + cookies_args + cookie_fallback_args
-
+    cmd = build_child_base_cmd(RECORDER_PATH, name, temp_target)
     log(f"🚀 Starting VIDEO recorder for @{name}, saving to temp {temp_target}")
-    # start_new_session=True → child doesn't receive Ctrl+C from the terminal
-    return subprocess.Popen(
-        cmd,
-        start_new_session=True,
-    )
+    return subprocess.Popen(cmd, start_new_session=True)
 
 
-def start_chat_recorder(channel_cfg):
-    name = channel_cfg['name']
+def start_chat_recorder(channel_cfg: dict[str, Any]) -> subprocess.Popen[Any]:
+    name = channel_cfg["name"]
     temp_target = temp_dir_for_channel(name)
-
     os.makedirs(temp_target, exist_ok=True)
-
-    cmd = [sys.executable, CHAT_RECORDER_PATH, name, temp_target] + cookies_args + cookie_fallback_args
-
+    cmd = build_child_base_cmd(CHAT_RECORDER_PATH, name, temp_target)
     log(f"💬 Starting CHAT recorder for @{name}, saving to temp {temp_target}")
-    return subprocess.Popen(
-        cmd,
-        start_new_session=True,
-    )
+    return subprocess.Popen(cmd, start_new_session=True)
 
 
-def start_recorders(channel_cfg):
-    procs = {}
+def start_recorders(channel_cfg: dict[str, Any]) -> dict[str, subprocess.Popen[Any]]:
+    procs: dict[str, subprocess.Popen[Any]] = {}
     procs["video"] = start_video_recorder(channel_cfg)
-    time.sleep(1)  # tiny stagger
+    time.sleep(1)
     procs["chat"] = start_chat_recorder(channel_cfg)
     return procs
 
 
-def stop_proc(label, proc):
+def stop_proc(label: str, proc: subprocess.Popen[Any] | None) -> None:
     if proc and proc.poll() is None:
         log(f"🛑 Stopping {label}")
         try:
             proc.terminate()
-        except Exception as e:
-            log(f"⚠️ Error sending terminate to {label}: {e}")
+        except Exception as exc:
+            log(f"⚠️ Error sending terminate to {label}: {exc}")
         try:
-            # Short timeout so shutdown feels snappy
             proc.wait(timeout=1)
         except subprocess.TimeoutExpired:
             log(f"⚠️ {label} did not exit, killing...")
             try:
                 proc.kill()
-            except Exception as e:
-                log(f"⚠️ Error killing {label}: {e}")
-        except Exception as e:
-            log(f"⚠️ Error while waiting for {label}: {e}")
+            except Exception as exc:
+                log(f"⚠️ Error killing {label}: {exc}")
+        except Exception as exc:
+            log(f"⚠️ Error while waiting for {label}: {exc}")
 
 
-def stop_recorder(channel_name):
+def stop_recorder(channel_name: str) -> None:
     procs = running_processes.get(channel_name, {})
     stop_proc(f"VIDEO recorder for @{channel_name}", procs.get("video"))
     stop_proc(f"CHAT recorder for @{channel_name}", procs.get("chat"))
     running_processes.pop(channel_name, None)
 
 
-def start_mover():
-    """Start tools/move_to_location.py as a sidecar process."""
+def start_mover() -> None:
     global mover_proc
     if mover_proc is not None and mover_proc.poll() is None:
-        return  # already running
+        return
 
     if not os.path.isfile(MOVER_PATH):
         log(f"⚠️ Mover script not found at {MOVER_PATH} – skipping mover start.")
@@ -136,64 +171,100 @@ def start_mover():
 
     cmd = [sys.executable, MOVER_PATH]
     log(f"🚚 Starting mover process: {' '.join(cmd)}")
-    mover_proc = subprocess.Popen(
-        cmd,
-        start_new_session=True,  # don't forward Ctrl+C to mover either
-    )
+    mover_proc = subprocess.Popen(cmd, start_new_session=True)
 
 
-def stop_mover():
-    """Stop the mover process if running."""
+def stop_mover() -> None:
     global mover_proc
     if mover_proc and mover_proc.poll() is None:
         stop_proc("mover process", mover_proc)
     mover_proc = None
 
 
-def cleanup(signum, frame):
+def update_yt_dlp(force: bool = False) -> None:
+    global last_yt_dlp_update_ts
+
+    now = time.time()
+    if not force and last_yt_dlp_update_ts is not None:
+        if (now - last_yt_dlp_update_ts) < yt_dlp_update_interval_seconds:
+            return
+
+    if not os.path.isfile(yt_dlp_bin):
+        log(f"⚠️ yt-dlp binary not found for helper auto-update: {yt_dlp_bin}")
+        last_yt_dlp_update_ts = now
+        return
+
+    log(f"📦 Checking yt-dlp updates via: {yt_dlp_bin} -U")
+    try:
+        proc = subprocess.run(
+            [yt_dlp_bin, "-U"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        output = (proc.stdout or "").strip()
+        if output:
+            for line in output.splitlines():
+                log(f"yt-dlp: {line}")
+        if proc.returncode != 0:
+            log(f"⚠️ yt-dlp self-update returned {proc.returncode}; continuing with existing binary.")
+        else:
+            version_proc = subprocess.run(
+                [yt_dlp_bin, "--version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            version = (version_proc.stdout or "").strip()
+            if version:
+                log(f"✅ yt-dlp version now: {version}")
+    except Exception as exc:
+        log(f"⚠️ yt-dlp self-update failed: {exc}")
+    finally:
+        last_yt_dlp_update_ts = now
+
+
+def cleanup(signum: int | None, frame: Any) -> None:
     global shutting_down
     if shutting_down:
-        # Ignore repeated Ctrl+C while we're already shutting down
         return
     shutting_down = True
 
     log("🧹 Cleaning up all recorders...")
-    # Stop all channel recorders
     for channel in list(running_processes.keys()):
         stop_recorder(channel)
 
-    # Stop mover
     stop_mover()
-
     log("👋 Helper exiting.")
-    sys.exit(0)
+    raise SystemExit(0)
 
 
-def main():
+def main() -> None:
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
     os.makedirs(TEMP_BASE, exist_ok=True)
 
-    # Start mover sidecar once
+    update_yt_dlp(force=True)
     start_mover()
 
     while True:
+        update_yt_dlp(force=False)
+
         configs = load_channels()
-        active_channels = {cfg['name']: cfg for cfg in configs}
+        active_channels = {cfg["name"]: cfg for cfg in configs}
         current_channels = set(running_processes.keys())
 
-        # Start new recorders for newly configured channels
         for name, cfg in active_channels.items():
             if name not in current_channels:
                 running_processes[name] = start_recorders(cfg)
                 time.sleep(2)
 
-        # Stop recorders for channels no longer in config
         for name in current_channels - set(active_channels.keys()):
             stop_recorder(name)
 
-        # Restart dead recorders for active channels
         for name in list(active_channels.keys()):
             procs = running_processes.get(name, {})
             for kind in ("video", "chat"):
@@ -210,30 +281,53 @@ def main():
         time.sleep(CHECK_INTERVAL)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Orchestrate multiple live stream recorders (video + chat) into temp dirs."
     )
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
-        '--cookies',
-        metavar='COOKIE_FILE',
-        help='Path to cookies.txt to be forwarded to all recorders (yt-dlp --cookies)'
+        "--cookies",
+        metavar="COOKIE_FILE",
+        help="Path to cookies.txt to be forwarded to all recorders (yt-dlp --cookies)",
     )
     group.add_argument(
-        '--cookies-from-browser',
-        metavar='BROWSER',
-        help='Browser name for yt-dlp --cookies-from-browser (e.g. firefox, chrome)'
+        "--cookies-from-browser",
+        metavar="BROWSER",
+        help="Browser name for yt-dlp --cookies-from-browser (e.g. firefox, chrome)",
     )
 
     parser.add_argument(
-        '--no-cookie-fallback',
-        action='store_true',
-        help='If cookies are provided, do NOT try the no-cookies-first then cookies fallback logic.'
+        "--no-cookie-fallback",
+        action="store_true",
+        help="If cookies are provided, do NOT try the no-cookies-first then cookies fallback logic.",
+    )
+    parser.add_argument(
+        "--yt-dlp-bin",
+        default=DEFAULT_YTDLP_BIN,
+        help="Absolute path or command name for the yt-dlp binary to use.",
+    )
+    parser.add_argument(
+        "--yt-dlp-update-interval-hours",
+        type=float,
+        default=DEFAULT_UPDATE_INTERVAL_HOURS,
+        help="How often the helper should run yt-dlp -U while it is running.",
     )
 
     args = parser.parse_args()
+
+    yt_dlp_bin = os.path.expanduser(args.yt_dlp_bin)
+    if not os.path.isabs(yt_dlp_bin):
+        resolved = shutil.which(yt_dlp_bin)
+        yt_dlp_bin = resolved or yt_dlp_bin
+
+    if not os.path.isfile(yt_dlp_bin):
+        log(f"⚠️ yt-dlp binary not found at startup: {yt_dlp_bin}")
+    else:
+        log(f"Using yt-dlp binary for all recorders: {yt_dlp_bin}")
+
+    yt_dlp_update_interval_seconds = max(1.0, args.yt_dlp_update_interval_hours) * 3600
 
     if args.cookies:
         candidate = os.path.expanduser(args.cookies)
@@ -246,7 +340,6 @@ if __name__ == '__main__':
         cookies_args = ["--cookies-from-browser", args.cookies_from_browser]
         log(f"Using cookies from browser for all recorders: {args.cookies_from_browser}")
 
-    # If cookies were supplied, enable fallback behavior in the recorder scripts unless explicitly disabled.
     if cookies_args and (not args.no_cookie_fallback):
         cookie_fallback_args = ["--cookie-fallback"]
         log("Cookie fallback enabled: recorders will try without cookies first, then retry with cookies if needed.")

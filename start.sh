@@ -5,7 +5,7 @@ set -euo pipefail
 # Starts the helper in the background (daemon-style) by default.
 # - Writes PID to ./run/channelliverecorder.pid
 # - Writes combined stdout/stderr to ./logs/daemon.log
-# - Auto-updates yt-dlp + deps before starting
+# - Updates yt-dlp before starting and helper keeps checking daily
 #
 # Foreground mode:
 #   ./start.sh --foreground [helper args...]
@@ -17,12 +17,14 @@ set -euo pipefail
 # Stop:
 #   ./stop.sh
 
-REPO_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="$REPO_ROOT/.venv"
 LOG_DIR="$REPO_ROOT/logs"
 RUN_DIR="$REPO_ROOT/run"
 PID_FILE="$RUN_DIR/channelliverecorder.pid"
 DAEMON_LOG="$LOG_DIR/daemon.log"
+YTDLP_BIN="/usr/local/bin/yt-dlp"
+YTDLP_UPDATE_INTERVAL_HOURS="${YTDLP_UPDATE_INTERVAL_HOURS:-24}"
 
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 
@@ -31,26 +33,37 @@ if [ ! -x "$VENV/bin/python" ]; then
   exit 1
 fi
 
-# Always use venv python explicitly
-VENV_PY="$VENV/bin/python"
+if [ ! -x "$YTDLP_BIN" ]; then
+  echo "❌ yt-dlp not found at $YTDLP_BIN"
+  echo "   Run: ./setup.sh"
+  exit 1
+fi
 
-# Parse args
+VENV_PY="$VENV/bin/python"
 FOREGROUND=0
 COOKIE_ARGS=()
 PASSTHRU_ARGS=()
 
-while (( "$#" )); do
+while (($#)); do
   case "$1" in
     --foreground)
       FOREGROUND=1
       shift
       ;;
     --cookies-from-browser)
-      COOKIE_ARGS+=("--cookies-from-browser" "${2:-}")
+      if [ $# -lt 2 ]; then
+        echo "❌ --cookies-from-browser requires a browser name"
+        exit 1
+      fi
+      COOKIE_ARGS+=("--cookies-from-browser" "$2")
       shift 2
       ;;
     --cookies)
-      COOKIE_ARGS+=("--cookies" "${2:-}")
+      if [ $# -lt 2 ]; then
+        echo "❌ --cookies requires a file path"
+        exit 1
+      fi
+      COOKIE_ARGS+=("--cookies" "$2")
       shift 2
       ;;
     --no-cookie-fallback)
@@ -68,8 +81,7 @@ while (( "$#" )); do
   esac
 done
 
-# Optional interactive cookie selection (only if not specified)
-if [ ${#COOKIE_ARGS[@]} -eq 0 ]; then
+if [ ${#COOKIE_ARGS[@]} -eq 0 ] && [ -t 0 ]; then
   echo
   echo "Cookie mode:"
   echo "  1) none (try without cookies)"
@@ -88,17 +100,33 @@ if [ ${#COOKIE_ARGS[@]} -eq 0 ]; then
   esac
 fi
 
-echo "✅ Using: $("$VENV_PY" --version)"
+echo "✅ Using Python: $("$VENV_PY" --version)"
 
-# Keep yt-dlp fresh (YouTube breaks often)
-echo "📦 Updating yt-dlp + deps (inside venv)..."
-"$VENV_PY" -m pip install -U pip wheel setuptools >/dev/null
-"$VENV_PY" -m pip install -U "yt-dlp[default]" requests Pillow PyYAML colorama >/dev/null
+echo "📦 Updating Python deps in venv..."
+"$VENV_PY" -m pip install -U pip wheel setuptools
+"$VENV_PY" -m pip install -U requests Pillow PyYAML colorama
 
-# Build the command that will run inside the daemon loop
-HELPER_CMD=( "$VENV_PY" "$REPO_ROOT/live_recording_helper.py" "${COOKIE_ARGS[@]}" "${PASSTHRU_ARGS[@]}" )
+echo "📦 Updating yt-dlp release binary..."
+set +e
+"$YTDLP_BIN" -U
+YTDLP_UPDATE_RC=$?
+set -e
+if [ "$YTDLP_UPDATE_RC" -ne 0 ]; then
+  echo "⚠️ yt-dlp self-update returned $YTDLP_UPDATE_RC; continuing with existing binary"
+fi
 
-# If already running, refuse to start a second copy
+echo "✅ yt-dlp path: $YTDLP_BIN"
+echo "✅ yt-dlp version: $("$YTDLP_BIN" --version)"
+
+HELPER_CMD=(
+  "$VENV_PY"
+  "$REPO_ROOT/live_recording_helper.py"
+  "--yt-dlp-bin" "$YTDLP_BIN"
+  "--yt-dlp-update-interval-hours" "$YTDLP_UPDATE_INTERVAL_HOURS"
+  "${COOKIE_ARGS[@]}"
+  "${PASSTHRU_ARGS[@]}"
+)
+
 if [ -f "$PID_FILE" ]; then
   oldpid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [ -n "${oldpid:-}" ] && kill -0 "$oldpid" 2>/dev/null; then
@@ -111,25 +139,30 @@ if [ "$FOREGROUND" -eq 1 ]; then
   echo "🚀 Starting in FOREGROUND. Logs: $LOG_DIR"
   echo "▶️ Helper: ${HELPER_CMD[*]}"
   while true; do
+    set +e
     "${HELPER_CMD[@]}"
     code=$?
+    set -e
     echo "⚠️ Helper exited with code $code. Restarting in 5s..."
     sleep 5
   done
 else
   echo "🚀 Starting in BACKGROUND. Logs: $DAEMON_LOG"
-  # Start a new session so it survives terminal close. Store session leader PID.
-  # The wrapper loop provides auto-restart.
-  setsid bash -c '
+  HELPER_CMD_ESCAPED="$(printf "%q " "${HELPER_CMD[@]}")"
+
+  setsid bash -c "
     set -euo pipefail
-    echo "===== $(date "+%Y-%m-%d %H:%M:%S") start ====="
+    echo \"===== \$(date '+%Y-%m-%d %H:%M:%S') start =====\"
     while true; do
-      '"$(printf "%q " "${HELPER_CMD[@]}")"'
-      code=$?
-      echo "[$(date "+%Y-%m-%d %H:%M:%S")] helper exited with code $code; restarting in 5s..."
+      set +e
+      $HELPER_CMD_ESCAPED
+      code=\$?
+      set -e
+      echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] helper exited with code \$code; restarting in 5s...\"
       sleep 5
     done
-  ' >> "$DAEMON_LOG" 2>&1 &
+  " >> "$DAEMON_LOG" 2>&1 &
+
   pid=$!
   echo "$pid" > "$PID_FILE"
   echo "✅ Started. PID $pid"
