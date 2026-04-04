@@ -25,6 +25,7 @@ PID_FILE="$RUN_DIR/channelliverecorder.pid"
 DAEMON_LOG="$LOG_DIR/daemon.log"
 YTDLP_BIN="/usr/local/bin/yt-dlp"
 YTDLP_UPDATE_INTERVAL_HOURS="${YTDLP_UPDATE_INTERVAL_HOURS:-24}"
+DEFAULT_COOKIE_BROWSER="${DEFAULT_COOKIE_BROWSER:-firefox}"
 
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 
@@ -43,6 +44,7 @@ VENV_PY="$VENV/bin/python"
 FOREGROUND=0
 COOKIE_ARGS=()
 PASSTHRU_ARGS=()
+COOKIE_MODE_SET=0
 
 while (($#)); do
   case "$1" in
@@ -56,6 +58,7 @@ while (($#)); do
         exit 1
       fi
       COOKIE_ARGS+=("--cookies-from-browser" "$2")
+      COOKIE_MODE_SET=1
       shift 2
       ;;
     --cookies)
@@ -64,6 +67,7 @@ while (($#)); do
         exit 1
       fi
       COOKIE_ARGS+=("--cookies" "$2")
+      COOKIE_MODE_SET=1
       shift 2
       ;;
     --no-cookie-fallback)
@@ -81,23 +85,9 @@ while (($#)); do
   esac
 done
 
-if [ ${#COOKIE_ARGS[@]} -eq 0 ] && [ -t 0 ]; then
-  echo
-  echo "Cookie mode:"
-  echo "  1) none (try without cookies)"
-  echo "  2) firefox"
-  echo "  3) chrome"
-  echo "  4) edge"
-  echo "  5) chromium"
-  read -r -p "Choose [1-5] (default 1): " choice
-  choice="${choice:-1}"
-  case "$choice" in
-    2) COOKIE_ARGS=("--cookies-from-browser" "firefox") ;;
-    3) COOKIE_ARGS=("--cookies-from-browser" "chrome") ;;
-    4) COOKIE_ARGS=("--cookies-from-browser" "edge") ;;
-    5) COOKIE_ARGS=("--cookies-from-browser" "chromium") ;;
-    *) COOKIE_ARGS=() ;;
-  esac
+if [ "$COOKIE_MODE_SET" -eq 0 ]; then
+  COOKIE_ARGS=("--cookies-from-browser" "$DEFAULT_COOKIE_BROWSER")
+  echo "🍪 No cookie source specified. Defaulting to browser cookies fallback: $DEFAULT_COOKIE_BROWSER"
 fi
 
 echo "✅ Using Python: $("$VENV_PY" --version)"

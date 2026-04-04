@@ -226,6 +226,9 @@ def main() -> int:
     p.add_argument("--poll-fast", type=int, default=60, help="Seconds between checks when close to live or in fast mode")
     p.add_argument("--fast-enter-minutes", type=int, default=30, help="Enter fast mode when scheduled start is within this many minutes")
     p.add_argument("--late-grace-minutes", type=int, default=20, help="Keep fast mode for this many minutes AFTER scheduled start")
+    p.add_argument("--auth-backoff-initial", type=int, default=600, help="Initial backoff after auth/bot blocks in seconds")
+    p.add_argument("--auth-backoff-max", type=int, default=3600, help="Maximum backoff after repeated auth/bot blocks in seconds")
+    p.add_argument("--prefer-cookies-minutes", type=int, default=180, help="After an auth problem, prefer starting WITH cookies for this many minutes")
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -246,6 +249,8 @@ def main() -> int:
     fast_mode_until_ts: float | None = None
     fast_enter_threshold = max(1, args.fast_enter_minutes) * 60
     late_grace_seconds = max(0, args.late_grace_minutes) * 60
+    auth_failures = 0
+    prefer_cookies_until_ts: float | None = None
 
     def maybe_update_fast_mode(summary: RunSummary) -> None:
         nonlocal fast_mode_until_ts
@@ -261,15 +266,27 @@ def main() -> int:
                 logger.info("⚡ Fast mode active for ~%ss (covers scheduled start + lateness buffer).", max(0, remaining))
 
     while True:
-        summary = run_yt_dlp(base_cmd.copy(), logger, stall_seconds=args.stall_seconds)
+        start_with_cookies = bool(
+            cookie_args
+            and prefer_cookies_until_ts is not None
+            and time.time() < prefer_cookies_until_ts
+        )
+
+        cmd = base_cmd.copy()
+        if start_with_cookies:
+            cmd[1:1] = cookie_args
+            logger.info("🍪 Preferring cookies-first mode due to recent auth/bot block.")
+
+        summary = run_yt_dlp(cmd, logger, stall_seconds=args.stall_seconds)
         maybe_update_fast_mode(summary)
 
         if summary.return_code == 0 and summary.saw_write_activity:
+            auth_failures = 0
             logger.info("✅ Chat recorder cycle completed; next check in 15s...")
             time.sleep(15)
             continue
 
-        if args.cookie_fallback and cookie_args and summary.saw_auth_block:
+        if args.cookie_fallback and cookie_args and (not start_with_cookies) and summary.saw_auth_block:
             logger.info("🔁 Auth/challenge issue detected — retrying chat WITH cookies...")
             cmd2 = base_cmd.copy()
             cmd2[1:1] = cookie_args
@@ -277,14 +294,31 @@ def main() -> int:
             maybe_update_fast_mode(summary2)
 
             if summary2.return_code == 0 and summary2.saw_write_activity:
+                auth_failures = 0
+                prefer_cookies_until_ts = time.time() + max(1, args.prefer_cookies_minutes) * 60
                 logger.info("✅ Chat recorder cycle completed with cookies; next check in 15s...")
                 time.sleep(15)
                 continue
 
             summary = summary2
 
+        if summary.saw_auth_block:
+            auth_failures += 1
+            prefer_cookies_until_ts = time.time() + max(1, args.prefer_cookies_minutes) * 60
+            sleep_s = min(args.auth_backoff_max, args.auth_backoff_initial * (2 ** (auth_failures - 1)))
+            logger.info(
+                "🚫 Auth/bot block detected (count=%s). Backing off chat checks for %ss to avoid hammering YouTube.",
+                auth_failures,
+                sleep_s,
+            )
+            time.sleep(sleep_s)
+            continue
+
+        if summary.not_live or summary.begins_in_seconds is not None:
+            auth_failures = 0
+
         sleep_s = compute_sleep_seconds(summary, args.poll_slow, args.poll_fast, fast_mode_until_ts)
-        logger.info("⏳ No chat capture. Next check in %ss...", sleep_s)
+        logger.info("⏳ No chat recording. Next check in %ss...", sleep_s)
         time.sleep(sleep_s)
 
 
